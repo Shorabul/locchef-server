@@ -40,6 +40,7 @@ async function run() {
         const ordersCollection = db.collection('orders');
         const reviewsCollection = db.collection('reviews');
         const favoriteCollection = db.collection('favorites');
+        const PaymentsCollection = db.collection('Payments');
 
         const isProduction = process.env.NODE_ENV === 'production';
 
@@ -292,6 +293,22 @@ async function run() {
         });
 
         // ------------------- Reviews Routes -------------------
+        // Get latest reviews (public)
+        app.get('/reviews/latest', async (req, res) => {
+            try {
+                const limit = parseInt(req.query.limit) || 6;
+                const reviews = await reviewsCollection
+                    .find({})
+                    .sort({ createdAt: -1 })
+                    .limit(limit)
+                    .toArray();
+                res.send({ success: true, data: reviews });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ success: false, message: "Failed to fetch latest reviews" });
+            }
+        });
+
         app.get('/reviews/:foodId', async (req, res) => {
             try {
                 const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ date: -1 }).toArray();
@@ -459,33 +476,140 @@ async function run() {
             }
         });
 
+
         app.patch('/payment-success', async (req, res) => {
             try {
                 const session = await stripe.checkout.sessions.retrieve(req.query.session_id);
                 const transactionId = session.payment_intent;
-
-                const exists = await ordersCollection.findOne({ transactionId });
-                if (exists) return res.send({
-                    success: true,
-                    message: "already exists",
-                    transactionId,
-                    trackingId: exists.trackingId
-                });
-
-                const trackingId = "MEAL-" + new Date().toISOString().slice(0, 10).replace(/-/g, "") + "-" + Math.random().toString(36).substring(2, 8).toUpperCase();
                 const orderId = session.metadata.orderId;
 
+                const order = await ordersCollection.findOne({ _id: new ObjectId(orderId) });
+
+                if (!order) {
+                    return res.status(404).send({ success: false, message: "Order not found" });
+                }
+
+                // STOP duplicates HERE
+                if (order.paymentStatus === "paid") {
+                    return res.send({
+                        success: true,
+                        transactionId: order.transactionId,
+                        trackingId: order.trackingId
+                    });
+                }
+
+                const trackingId =
+                    "MEAL-" +
+                    new Date().toISOString().slice(0, 10).replace(/-/g, "") +
+                    "-" +
+                    Math.random().toString(36).substring(2, 8).toUpperCase();
+
+                // Update order FIRST
                 await ordersCollection.updateOne(
                     { _id: new ObjectId(orderId) },
-                    { $set: { paymentStatus: "paid", transactionId, trackingId } }
+                    {
+                        $set: {
+                            paymentStatus: "paid",
+                            transactionId,
+                            trackingId
+                        }
+                    }
                 );
 
-                res.send({ success: true, transactionId, trackingId });
+                // Insert payment ONCE
+                await PaymentsCollection.insertOne({
+                    orderId: new ObjectId(orderId),
+                    userEmail: order.userEmail,
+                    chefId: order.chefId,
+                    mealName: order.foodName,
+                    amount: order.price * order.quantity,
+                    currency: "usd",
+                    transactionId,
+                    paymentMethod: "stripe",
+                    paymentStatus: "paid",
+                    createdAt: new Date()
+                });
+
+                res.send({
+                    success: true,
+                    transactionId,
+                    trackingId
+                });
             } catch (error) {
                 console.error("Payment success error:", error);
                 res.status(500).send({ success: false, error: "Payment process failed" });
             }
         });
+
+        app.get('/payments/user/:email', verifyToken, async (req, res) => {
+            try {
+                const payments = await PaymentsCollection
+                    .find({ userEmail: req.params.email })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send({ success: true, data: payments });
+            } catch (error) {
+                res.status(500).send({ success: false, message: "Failed to fetch payments" });
+            }
+        });
+
+        app.get('/payments', verifyToken, verifyAdmin, async (req, res) => {
+            const payments = await PaymentsCollection.find().sort({ createdAt: -1 }).toArray();
+            res.send({ success: true, data: payments });
+        });
+
+        app.get(
+            "/admin/platform-stats",
+            verifyToken,
+            verifyAdmin,
+            async (req, res) => {
+                try {
+                    // Total users
+                    const totalUsers = await usersCollection.countDocuments();
+
+                    // Orders stats
+                    const ordersPending = await ordersCollection.countDocuments({
+                        orderStatus: { $ne: "delivered" },
+                    });
+
+                    const ordersDelivered = await ordersCollection.countDocuments({
+                        orderStatus: "delivered",
+                    });
+
+                    // Total payments (sum of all paid amounts)
+                    const paymentResult = await PaymentsCollection.aggregate([
+                        {
+                            $match: { paymentStatus: "paid" },
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                totalAmount: { $sum: "$amount" },
+                            },
+                        },
+                    ]).toArray();
+
+                    const totalPayments =
+                        paymentResult.length > 0 ? paymentResult[0].totalAmount : 0;
+
+                    res.send({
+                        totalPayments,
+                        totalUsers,
+                        ordersPending,
+                        ordersDelivered,
+                    });
+                } catch (error) {
+                    console.error("Platform stats error:", error);
+                    res.status(500).send({
+                        success: false,
+                        message: "Failed to load platform statistics",
+                    });
+                }
+            }
+        );
+
+
 
         // ------------------- MongoDB Ping -------------------
         await client.db("admin").command({ ping: 1 });
