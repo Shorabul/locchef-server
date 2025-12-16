@@ -89,7 +89,7 @@ async function run() {
                 const result = await usersCollection.find().toArray();
                 res.send({ success: true, data: result, total: result.length });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ error: 'Failed to fetch users' });
             }
         });
@@ -99,7 +99,7 @@ async function run() {
                 const result = await usersCollection.findOne({ email: req.params.email });
                 res.send(result);
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ error: 'Failed to fetch users' });
             }
         });
@@ -120,7 +120,7 @@ async function run() {
         app.post('/users', async (req, res) => {
             const user = req.body;
             user.role = 'user';
-            user.createAt = new Date();
+            user.createdAt = new Date();
 
             const userExists = await usersCollection.findOne({ email: user.email });
             if (userExists) return res.send({ message: 'user exists' });
@@ -137,8 +137,38 @@ async function run() {
                 );
                 res.send(result);
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ error: 'Failed to update user' });
+            }
+        });
+
+        app.patch('/users/:email/update-photo', verifyToken, async (req, res) => {
+            try {
+                const { photoURL } = req.body;
+
+                if (!photoURL) {
+                    return res.status(400).send({ error: 'Missing photoURL in request body.' });
+                }
+
+                // Use the user's email from the URL parameter to find and update the document
+                const result = await usersCollection.updateOne(
+                    { email: req.params.email },
+                    { $set: { photoURL: photoURL } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ error: 'User not found.' });
+                }
+
+                res.send({
+                    success: true,
+                    message: 'Photo URL updated successfully.',
+                    modifiedCount: result.modifiedCount
+                });
+
+            } catch (error) {
+
+                res.status(500).send({ error: 'Failed to update user photo URL' });
             }
         });
 
@@ -171,7 +201,7 @@ async function run() {
 
                 res.send({ success: true, data: result });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Server error" });
             }
         });
@@ -200,7 +230,7 @@ async function run() {
                     return res.send({ success: true, message: "Request approved" });
                 }
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Server error" });
             }
         });
@@ -238,7 +268,7 @@ async function run() {
 
                 res.send({ total, page, limit, pages: Math.ceil(total / limit), data: meals });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch meals" });
             }
         });
@@ -249,7 +279,7 @@ async function run() {
                 const result = await mealsCollection.find({ chefEmail: req.params.email }).toArray();
                 res.send({ success: true, data: result });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Server error" });
             }
         });
@@ -259,7 +289,7 @@ async function run() {
                 const result = await mealsCollection.findOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, data: result });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch meal" });
             }
         });
@@ -288,7 +318,7 @@ async function run() {
                 const result = await mealsCollection.insertOne(meal);
                 res.send({ success: true, data: result });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Server error" });
             }
         });
@@ -308,7 +338,7 @@ async function run() {
                 );
                 res.send({ success: true, modifiedCount: result.modifiedCount, message: "Meal updated successfully" });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to update meal" });
             }
         });
@@ -318,7 +348,7 @@ async function run() {
                 const result = await mealsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, data: result });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Server error" });
             }
         });
@@ -335,7 +365,7 @@ async function run() {
                     .toArray();
                 res.send({ success: true, data: reviews });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch latest reviews" });
             }
         });
@@ -345,7 +375,7 @@ async function run() {
                 const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: reviews });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch reviews" });
             }
         });
@@ -377,7 +407,7 @@ async function run() {
 
                 res.send({ success: true, data: reviews });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch reviews" });
             }
         });
@@ -407,7 +437,7 @@ async function run() {
 
                 res.send({ success: true, data: result, message: 'Review added and meal rating updated' });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to save review" });
             }
         });
@@ -422,7 +452,7 @@ async function run() {
                 if (result.modifiedCount === 1) res.send({ success: true, message: "Review updated successfully" });
                 else res.status(404).send({ success: false, message: "Review not found or no changes made" });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to update review" });
             }
         });
@@ -433,7 +463,7 @@ async function run() {
                 if (result.deletedCount === 1) res.send({ success: true, message: "Review deleted successfully" });
                 else res.status(404).send({ success: false, message: "Review not found" });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to delete review" });
             }
         });
@@ -444,7 +474,7 @@ async function run() {
                 const favorites = await favoriteCollection.find({ userEmail: req.query.userEmail }).toArray();
                 res.send({ success: true, data: favorites });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch favorites" });
             }
         });
@@ -455,11 +485,11 @@ async function run() {
                 const exists = await favoriteCollection.findOne({ userEmail: favorite.userEmail, foodId: favorite.foodId });
                 if (exists) return res.send({ success: false, message: "Meal already in favorites" });
 
-                favorite.createAt = new Date();
+                favorite.createdAt = new Date();
                 const result = await favoriteCollection.insertOne(favorite);
                 res.send({ success: true, data: result, message: "Added to favorites" });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to save favorite" });
             }
         });
@@ -469,7 +499,7 @@ async function run() {
                 await favoriteCollection.deleteOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, message: 'Favorite deleted' });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to delete favorite" });
             }
         });
@@ -480,7 +510,7 @@ async function run() {
                 const orders = await ordersCollection.find({ userEmail: req.params.email }).toArray();
                 res.send({ success: true, data: orders });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch orders" });
             }
         });
@@ -490,7 +520,7 @@ async function run() {
                 const orders = await ordersCollection.find({ chefId: req.params.chefId }).toArray();
                 res.send({ success: true, data: orders });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to fetch chef orders" });
             }
         });
@@ -498,7 +528,7 @@ async function run() {
         app.post('/order', verifyToken, async (req, res) => {
             try {
                 const order = req.body;
-                order.createAt = new Date();
+                order.createdAt = new Date();
                 const result = await ordersCollection.insertOne(order);
                 res.send(result);
             } catch (error) {
@@ -514,7 +544,7 @@ async function run() {
                 );
                 res.send({ success: true, modifiedCount: result.modifiedCount });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Failed to update order status" });
             }
         });
@@ -544,7 +574,7 @@ async function run() {
 
                 res.send({ url: session.url });
             } catch (error) {
-                console.error(error);
+
                 res.status(500).send({ success: false, message: "Payment session creation failed" });
             }
         });
