@@ -218,7 +218,13 @@ async function run() {
                 if (req.query.fields) req.query.fields.split(",").forEach(f => fields[f] = 1);
 
                 const filter = {};
+                // Featured filter
                 if (req.query.featured === "true") filter.featured = true;
+
+                // Search filter
+                if (req.query.search) {
+                    filter.foodName = { $regex: req.query.search, $options: "i" }; // case-insensitive search
+                }
 
                 const meals = await mealsCollection
                     .find(filter)
@@ -237,7 +243,8 @@ async function run() {
             }
         });
 
-        app.get('/meals/chef/:email', async (req, res) => {
+
+        app.get('/meals/chef/:email', verifyToken, async (req, res) => {
             try {
                 const result = await mealsCollection.find({ chefEmail: req.params.email }).toArray();
                 res.send({ success: true, data: result });
@@ -247,7 +254,7 @@ async function run() {
             }
         });
 
-        app.get("/meals/id/:id", async (req, res) => {
+        app.get("/meals/id/:id", verifyToken, async (req, res) => {
             try {
                 const result = await mealsCollection.findOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, data: result });
@@ -260,7 +267,24 @@ async function run() {
         app.post('/meals', verifyToken, async (req, res) => {
             try {
                 const meal = req.body;
+
+                // Convert price and deliveryRadius to numbers
+                meal.price = parseFloat(meal.price);
+                meal.deliveryRadius = parseFloat(meal.deliveryRadius);
+
+                // Convert rating to number (if you have default rating)
+                meal.rating = meal.rating ? parseFloat(meal.rating) : 0;
+
+                // Convert ingredients to array if it's a string
+                if (typeof meal.ingredients === 'string') {
+                    meal.ingredients = meal.ingredients
+                        .split(',')
+                        .map(item => item.trim())
+                        .filter(Boolean);
+                }
+
                 meal.createdAt = new Date();
+
                 const result = await mealsCollection.insertOne(meal);
                 res.send({ success: true, data: result });
             } catch (error) {
@@ -269,11 +293,18 @@ async function run() {
             }
         });
 
-        app.patch("/meals/:id", async (req, res) => {
+
+        app.patch("/meals/:id", verifyToken, async (req, res) => {
             try {
+                const meal = req.body;
+
+                // Convert price and deliveryRadius to numbers
+                meal.price = parseFloat(meal.price);
+                meal.deliveryRadius = parseFloat(meal.deliveryRadius);
+
                 const result = await mealsCollection.updateOne(
                     { _id: new ObjectId(req.params.id) },
-                    { $set: req.body }
+                    { $set: meal }
                 );
                 res.send({ success: true, modifiedCount: result.modifiedCount, message: "Meal updated successfully" });
             } catch (error) {
@@ -282,7 +313,7 @@ async function run() {
             }
         });
 
-        app.delete('/meals/:id', async (req, res) => {
+        app.delete('/meals/:id', verifyToken, async (req, res) => {
             try {
                 const result = await mealsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, data: result });
@@ -309,9 +340,9 @@ async function run() {
             }
         });
 
-        app.get('/reviews/:foodId', async (req, res) => {
+        app.get('/reviews/:foodId', verifyToken, async (req, res) => {
             try {
-                const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ date: -1 }).toArray();
+                const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: reviews });
             } catch (error) {
                 console.error(error);
@@ -321,7 +352,29 @@ async function run() {
 
         app.get('/reviews/user/:email', verifyToken, async (req, res) => {
             try {
-                const reviews = await reviewsCollection.find({ userEmail: req.params.email }).sort({ date: -1 }).toArray();
+                const reviews = await reviewsCollection.aggregate([
+                    { $match: { userEmail: req.params.email } },
+                    { $sort: { createdAt: -1 } },
+                    {
+                        $lookup: {
+                            from: "meals",
+                            let: { fid: { $toObjectId: "$foodId" } },
+                            pipeline: [
+                                { $match: { $expr: { $eq: ["$_id", "$$fid"] } } },
+                                { $project: { foodName: 1, foodImage: 1, chefName: 1 } }
+                            ],
+                            as: "mealInfo"
+                        }
+                    },
+                    {
+                        $addFields: {
+                            foodName: { $arrayElemAt: ["$mealInfo.foodName", 0] },
+                        }
+                    },
+                    // keep all review fields, just drop the raw mealInfo array
+                    { $project: { mealInfo: 0 } }
+                ]).toArray();
+
                 res.send({ success: true, data: reviews });
             } catch (error) {
                 console.error(error);
@@ -329,16 +382,36 @@ async function run() {
             }
         });
 
-        app.post('/reviews', async (req, res) => {
+
+
+        app.post('/reviews', verifyToken, async (req, res) => {
             try {
                 const review = { ...req.body, createdAt: new Date() };
                 const result = await reviewsCollection.insertOne(review);
-                res.send({ success: true, data: result });
+
+                // ------------------- Update average rating -------------------
+                const { foodId, rating } = review;
+
+                // Get all reviews for this meal
+                const reviews = await reviewsCollection.find({ foodId }).toArray();
+
+                // Calculate average rating
+                const totalRating = reviews.reduce((acc, curr) => acc + parseFloat(curr.rating), 0);
+                const avgRating = (totalRating / reviews.length).toFixed(1); // e.g., 4.3
+
+                // Update the meal document
+                await mealsCollection.updateOne(
+                    { _id: new ObjectId(foodId) },
+                    { $set: { rating: parseFloat(avgRating) } }
+                );
+
+                res.send({ success: true, data: result, message: 'Review added and meal rating updated' });
             } catch (error) {
                 console.error(error);
                 res.status(500).send({ success: false, message: "Failed to save review" });
             }
         });
+
 
         app.patch('/reviews/:id', verifyToken, async (req, res) => {
             try {
@@ -402,7 +475,7 @@ async function run() {
         });
 
         // ------------------- Orders Routes -------------------
-        app.get('/orders/user/:email', async (req, res) => {
+        app.get('/orders/user/:email', verifyToken, async (req, res) => {
             try {
                 const orders = await ordersCollection.find({ userEmail: req.params.email }).toArray();
                 res.send({ success: true, data: orders });
@@ -412,7 +485,7 @@ async function run() {
             }
         });
 
-        app.get('/orders/chef/:chefId', async (req, res) => {
+        app.get('/orders/chef/:chefId', verifyToken, async (req, res) => {
             try {
                 const orders = await ordersCollection.find({ chefId: req.params.chefId }).toArray();
                 res.send({ success: true, data: orders });
@@ -422,7 +495,7 @@ async function run() {
             }
         });
 
-        app.post('/order', async (req, res) => {
+        app.post('/order', verifyToken, async (req, res) => {
             try {
                 const order = req.body;
                 order.createAt = new Date();
@@ -433,7 +506,7 @@ async function run() {
             }
         });
 
-        app.patch('/orders/status/:orderId', async (req, res) => {
+        app.patch('/orders/status/:orderId', verifyToken, async (req, res) => {
             try {
                 const result = await ordersCollection.updateOne(
                     { _id: new ObjectId(req.params.orderId) },
@@ -446,7 +519,7 @@ async function run() {
             }
         });
 
-        app.post('/orders/payment-checkout-session', async (req, res) => {
+        app.post('/orders/payment-checkout-session', verifyToken, async (req, res) => {
             const order = req.body;
             const amount = parseInt(order.totalPrice) * 100;
 
@@ -477,7 +550,7 @@ async function run() {
         });
 
 
-        app.patch('/payment-success', async (req, res) => {
+        app.patch('/payment-success', verifyToken, async (req, res) => {
             try {
                 const session = await stripe.checkout.sessions.retrieve(req.query.session_id);
                 const transactionId = session.payment_intent;
