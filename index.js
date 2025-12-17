@@ -29,7 +29,7 @@ const client = new MongoClient(process.env.MONGO_URI, {
 // ------------------- Main Function -------------------
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
 
         const db = client.db('local_chef_bazaar_db');
 
@@ -65,7 +65,7 @@ async function run() {
 
         // ------------------- Auth Routes -------------------
         app.post("/jwt", async (req, res) => {
-            const user = req.body; // { email, role }
+            const user = req.body;
             const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: "7d" });
 
             res.cookie("token", token, {
@@ -715,8 +715,8 @@ async function run() {
 
 
         // ------------------- MongoDB Ping -------------------
-        await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // await client.close();
     }
@@ -727,4 +727,5 @@ run().catch(console.dir);
 app.get('/', (req, res) => res.send('Hello World!'));
 
 // ------------------- Start Server -------------------
-app.listen(port, () => console.log(`Server running on port ${port}`));
+// app.listen(port, () => console.log(`Server running on port ${port}`));
+module.exports = app;
