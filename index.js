@@ -3,19 +3,22 @@ const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
-const jwt = require("jsonwebtoken");
-const cookieParser = require("cookie-parser");
+const admin = require("firebase-admin");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
+
 // ------------------- Middleware -------------------
 app.use(express.json());
-app.use(cors({
-    origin: process.env.FRONTEND_URL,
-    credentials: true,
-}));
-app.use(cookieParser());
+app.use(cors());
 
 // ------------------- MongoDB Client -------------------
 const client = new MongoClient(process.env.MONGO_URI, {
@@ -29,7 +32,7 @@ const client = new MongoClient(process.env.MONGO_URI, {
 // ------------------- Main Function -------------------
 async function run() {
     try {
-        // await client.connect();
+        await client.connect();
 
         const db = client.db('local_chef_bazaar_db');
 
@@ -42,51 +45,43 @@ async function run() {
         const favoriteCollection = db.collection('favorites');
         const PaymentsCollection = db.collection('Payments');
 
-        const isProduction = process.env.NODE_ENV === 'production';
 
         // ------------------- Middleware Functions -------------------
-        const verifyToken = (req, res, next) => {
-            const token = req.cookies.token;
-            if (!token) return res.status(401).send({ message: "Unauthorized" });
 
-            jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-                if (err) return res.status(401).send({ message: "Unauthorized" });
+        const verifyToken = async (req, res, next) => {
+            const authHeader = req.headers.authorization;
+
+            if (!authHeader || !authHeader.startsWith("Bearer ")) {
+                return res.status(401).send({ message: "Unauthorized" });
+            }
+
+            try {
+                const token = authHeader.split(" ")[1];
+                const decoded = await admin.auth().verifyIdToken(token);
+
                 req.user = decoded;
                 next();
-            });
+            } catch (error) {
+                return res.status(401).send({ message: "Unauthorized" });
+            }
         };
 
         const verifyAdmin = async (req, res, next) => {
             const email = req.user.email;
+
             const user = await usersCollection.findOne({ email });
-            if (user?.role !== "admin") return res.status(403).send({ message: "Forbidden" });
+
+            if (!user || user.role !== "admin") {
+                return res.status(403).send({ message: "Forbidden" });
+            }
+
             next();
         };
-
-        // ------------------- Auth Routes -------------------
-        app.post("/jwt", async (req, res) => {
-            const user = req.body;
-            const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: "7d" });
-
-            res.cookie("token", token, {
-                httpOnly: true,
-                secure: true,
-                sameSite: "none",
-            }).send({ success: true });
-        });
-
-        app.post("/logout", (req, res) => {
-            res.clearCookie("token", {
-                httpOnly: true,
-                secure: isProduction,
-                sameSite: isProduction ? "none" : "lax",
-            }).send({ success: true });
-        });
 
         // ------------------- User Routes -------------------
         app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
             try {
-                const result = await usersCollection.find().toArray();
+                const result = await usersCollection.find().sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: result, total: result.length });
             } catch (error) {
 
@@ -104,7 +99,7 @@ async function run() {
             }
         });
 
-        app.get('/users/:email/role', async (req, res) => {
+        app.get('/users/:email/role', verifyToken, async (req, res) => {
             try {
                 const user = await usersCollection.findOne(
                     { email: req.params.email },
@@ -129,7 +124,7 @@ async function run() {
             res.send(result);
         });
 
-        app.patch('/users/:email', async (req, res) => {
+        app.patch('/users/:email', verifyToken, verifyAdmin, async (req, res) => {
             try {
                 const result = await usersCollection.updateOne(
                     { email: req.params.email },
@@ -174,7 +169,7 @@ async function run() {
 
         // ------------------- Role Request Routes -------------------
         app.get('/role-requests', verifyToken, verifyAdmin, async (req, res) => {
-            const requests = await roleRequestsCollection.find({}).toArray();
+            const requests = await roleRequestsCollection.find({}).sort({ createdAt: -1 }).toArray();
             res.send(requests);
         });
 
@@ -213,8 +208,15 @@ async function run() {
             try {
                 if (action === "rejected") {
                     await roleRequestsCollection.updateOne(
-                        { userEmail: email },
+                        {
+                            userEmail: email,
+                            requestType: requestType,
+                        },
                         { $set: { requestStatus: "rejected" } }
+                    );
+                    await usersCollection.updateOne(
+                        { email: email },
+                        { $set: { [`roleRequest.${requestType}`]: "rejected" } }
                     );
                     return res.send({ success: true, message: "Request rejected" });
                 }
@@ -225,7 +227,11 @@ async function run() {
                     if (requestType === "admin") updateFields.role = "admin";
 
                     await usersCollection.updateOne({ email }, { $set: updateFields });
-                    await roleRequestsCollection.updateOne({ userEmail: email }, { $set: { requestStatus: "approved" } });
+                    await roleRequestsCollection.updateOne({ userEmail: email, requestType: requestType }, { $set: { requestStatus: "approved" } });
+                    await usersCollection.updateOne(
+                        { email: email },
+                        { $set: { [`roleRequest.${requestType}`]: "approved" } }
+                    );
 
                     return res.send({ success: true, message: "Request approved" });
                 }
@@ -236,39 +242,158 @@ async function run() {
         });
 
         // ------------------- Meals Routes -------------------
+        // app.get("/meals", async (req, res) => {
+        //     try {
+        //         const page = parseInt(req.query.page) || 1;
+        //         const limit = parseInt(req.query.limit) || 10;
+        //         const skip = (page - 1) * limit;
+        //         const sortBy = req.query.sortBy || "_id";
+        //         const order = req.query.order === "desc" ? -1 : 1;
+
+        //         let fields = {};
+        //         if (req.query.fields) req.query.fields.split(",").forEach(f => fields[f] = 1);
+
+        //         const filter = {};
+        //         // Featured filter
+        //         if (req.query.featured === "true") filter.featured = true;
+
+        //         // Search filter
+        //         if (req.query.search) {
+        //             filter.foodName = { $regex: req.query.search, $options: "i" }; // case-insensitive search
+        //         }
+
+        //         const meals = await mealsCollection
+        //             .find(filter)
+        //             .project(fields)
+        //             .sort({ [sortBy]: order })
+        //             .skip(skip)
+        //             .limit(limit)
+        //             .toArray();
+
+        //         const total = await mealsCollection.countDocuments(filter);
+
+        //         res.send({ total, page, limit, pages: Math.ceil(total / limit), data: meals });
+        //     } catch (error) {
+
+        //         res.status(500).send({ success: false, message: "Failed to fetch meals" });
+        //     }
+        // });
+        // app.get("/meals", async (req, res) => {
+        //     try {
+        //         const page = parseInt(req.query.page) || 1;
+        //         const limit = parseInt(req.query.limit) || 10;
+        //         const skip = (page - 1) * limit;
+        //         const sortBy = req.query.sortBy || "_id";
+        //         const order = req.query.order === "desc" ? -1 : 1;
+
+        //         let fields = {};
+        //         if (req.query.fields) req.query.fields.split(",").forEach(f => fields[f] = 1);
+
+        //         // --- FILTER BUILDING START ---
+        //         const filter = {};
+
+        //         // 1. Featured filter
+        //         if (req.query.featured === "true") filter.featured = true;
+
+        //         // 2. Search filter (Food Name)
+        //         if (req.query.search) {
+        //             filter.foodName = { $regex: req.query.search, $options: "i" };
+        //         }
+
+        //         // 3. Category filter
+        //         if (req.query.category && req.query.category !== "all") {
+        //             filter.category = req.query.category;
+        //         }
+
+        //         // 4. Price Range filter (The missing piece!)
+        //         const minPrice = parseFloat(req.query.minPrice);
+        //         const maxPrice = parseFloat(req.query.maxPrice);
+
+        //         if (!isNaN(minPrice) || !isNaN(maxPrice)) {
+        //             filter.price = {};
+        //             if (!isNaN(minPrice)) filter.price.$gte = minPrice; // Greater than or equal to
+        //             if (!isNaN(maxPrice)) filter.price.$lte = maxPrice; // Less than or equal to
+        //         }
+        //         // --- FILTER BUILDING END ---
+
+        //         const meals = await mealsCollection
+        //             .find(filter)
+        //             .project(fields)
+        //             .sort({ [sortBy]: order })
+        //             .skip(skip)
+        //             .limit(limit)
+        //             .toArray();
+
+        //         const total = await mealsCollection.countDocuments(filter);
+
+        //         res.send({
+        //             total,
+        //             page,
+        //             limit,
+        //             pages: Math.ceil(total / limit),
+        //             data: meals
+        //         });
+        //     } catch (error) {
+        //         res.status(500).send({ success: false, message: "Failed to fetch meals" });
+        //     }
+        // });
         app.get("/meals", async (req, res) => {
             try {
                 const page = parseInt(req.query.page) || 1;
-                const limit = parseInt(req.query.limit) || 10;
+                const limit = parseInt(req.query.limit) || 8; // Match frontend limit
                 const skip = (page - 1) * limit;
+
+                // Sorting logic
                 const sortBy = req.query.sortBy || "_id";
                 const order = req.query.order === "desc" ? -1 : 1;
 
                 let fields = {};
-                if (req.query.fields) req.query.fields.split(",").forEach(f => fields[f] = 1);
-
-                const filter = {};
-                // Featured filter
-                if (req.query.featured === "true") filter.featured = true;
-
-                // Search filter
-                if (req.query.search) {
-                    filter.foodName = { $regex: req.query.search, $options: "i" }; // case-insensitive search
+                if (req.query.fields) {
+                    req.query.fields.split(",").forEach(f => fields[f.trim()] = 1);
                 }
 
+                const filter = {};
+
+                // 1. Search filter
+                if (req.query.search) {
+                    filter.foodName = { $regex: req.query.search, $options: "i" };
+                }
+
+                // 2. Category filter
+                if (req.query.category && req.query.category !== "all" && req.query.category !== "undefined") {
+                    filter.category = req.query.category;
+                }
+
+                // 3. Price Range filter
+                const minPrice = parseFloat(req.query.minPrice);
+                const maxPrice = parseFloat(req.query.maxPrice);
+
+                if (!isNaN(minPrice) || !isNaN(maxPrice)) {
+                    filter.price = {};
+                    if (!isNaN(minPrice)) filter.price.$gte = minPrice;
+                    if (!isNaN(maxPrice)) filter.price.$lte = maxPrice;
+                }
+
+                // Execute Query
                 const meals = await mealsCollection
                     .find(filter)
                     .project(fields)
-                    .sort({ [sortBy]: order })
+                    .sort({ [sortBy]: order }) // Correctly applies price sorting
                     .skip(skip)
                     .limit(limit)
                     .toArray();
 
                 const total = await mealsCollection.countDocuments(filter);
 
-                res.send({ total, page, limit, pages: Math.ceil(total / limit), data: meals });
+                res.send({
+                    total,
+                    page,
+                    limit,
+                    pages: Math.ceil(total / limit),
+                    data: meals
+                });
             } catch (error) {
-
+                console.error(error);
                 res.status(500).send({ success: false, message: "Failed to fetch meals" });
             }
         });
@@ -284,7 +409,7 @@ async function run() {
             }
         });
 
-        app.get("/meals/id/:id", verifyToken, async (req, res) => {
+        app.get("/meals/id/:id", async (req, res) => {
             try {
                 const result = await mealsCollection.findOne({ _id: new ObjectId(req.params.id) });
                 res.send({ success: true, data: result });
@@ -370,7 +495,7 @@ async function run() {
             }
         });
 
-        app.get('/reviews/:foodId', verifyToken, async (req, res) => {
+        app.get('/reviews/id/:foodId', async (req, res) => {
             try {
                 const reviews = await reviewsCollection.find({ foodId: req.params.foodId }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: reviews });
@@ -471,7 +596,7 @@ async function run() {
         // ------------------- Favorites Routes -------------------
         app.get('/favorites', verifyToken, async (req, res) => {
             try {
-                const favorites = await favoriteCollection.find({ userEmail: req.query.userEmail }).toArray();
+                const favorites = await favoriteCollection.find({ userEmail: req.query.userEmail }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: favorites });
             } catch (error) {
 
@@ -507,7 +632,7 @@ async function run() {
         // ------------------- Orders Routes -------------------
         app.get('/orders/user/:email', verifyToken, async (req, res) => {
             try {
-                const orders = await ordersCollection.find({ userEmail: req.params.email }).toArray();
+                const orders = await ordersCollection.find({ userEmail: req.params.email }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: orders });
             } catch (error) {
 
@@ -517,7 +642,7 @@ async function run() {
 
         app.get('/orders/chef/:chefId', verifyToken, async (req, res) => {
             try {
-                const orders = await ordersCollection.find({ chefId: req.params.chefId }).toArray();
+                const orders = await ordersCollection.find({ chefId: req.params.chefId }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: orders });
             } catch (error) {
 
@@ -715,8 +840,8 @@ async function run() {
 
 
         // ------------------- MongoDB Ping -------------------
-        // await client.db("admin").command({ ping: 1 });
-        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        await client.db("admin").command({ ping: 1 });
+        console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // await client.close();
     }
@@ -724,8 +849,8 @@ async function run() {
 run().catch(console.dir);
 
 // ------------------- Root Route -------------------
-app.get('/', (req, res) => res.send('Hello World!'));
+app.get('/', (req, res) => res.send('LocChef API running'));
 
 // ------------------- Start Server -------------------
-// app.listen(port, () => console.log(`Server running on port ${port}`));
-module.exports = app;
+app.listen(port, () => console.log(`Server running on port ${port}`));
+// module.exports = app;
